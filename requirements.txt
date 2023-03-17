@@ -1,0 +1,16 @@
+aiogram==2.23.1
+alembic==1.8.1
+APScheduler==3.10.0
+asyncmy==0.2.5
+databases==0.6.2
+SQLAlchemy==1.4.41
+sqlalchemy-repr==0.0.2
+Telethon==1.25.2
+transliterate==1.10.2
+dirt-tongue==0.1.2
+lru-cache==0.2.3
+XlsxWriter==3.0.8
+openpyxl==3.1.1
+googletrans==3.1.0a0
+requests==2.28.2
+python-socks[asyncio]
