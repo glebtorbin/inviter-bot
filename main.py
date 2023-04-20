@@ -2,6 +2,7 @@
 import logging
 import logging.handlers as loghandlers
 import random
+import requests
 from enum import Enum
 from datetime import datetime, timedelta
 import os
@@ -15,6 +16,9 @@ from aiogram.utils import executor
 from telethon.errors.rpcerrorlist import PhoneCodeExpiredError
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from telethon.tl.functions.channels import JoinChannelRequest, InviteToChannelRequest
+from telethon.tl.functions.messages import AddChatUserRequest, ImportChatInviteRequest
+from telethon.tl.types import PeerChat, InputUser
 
 from report_generators import gen_report, gen_plan
 
@@ -31,12 +35,13 @@ from keyboards import (
     get_services_markup, go_to_main_markup, parse_start_markup,
     lang_ch_markup, user_accept_markup, sphere_markup, work_markup,
     bot_usage_markup, get_user_markup, get_profile_markup, cur_markup,
-    pay_markup, true_ans_markup, accept_bot_markup, success_add_channel, error_pars_chat, go_to_profile,
+    pay_markup, accept_bot_markup, success_add_channel, error_pars_chat, go_to_profile,
     chat_profile_card, get_inline_chats_pars, chat_pars_card, call_employee, choice_add_sour, get_inline_del_source,
     cancel_markup_profile, add_triger_markup, inline_pay_markup,
     inline_no_groups__markup, inline_apply_group_ch_markup, inline_scrap_or_invite_markup,
     send_contact_markup, cancel_markup, nps_markup, nps_markup, support_markup, wa_check_qr_markup,
-    wa_save_mailing_markup, get_inline_wa_client_markup
+    wa_save_mailing_markup, get_inline_wa_mailing_cont_markup, get_inline_wa_mailing_stop_markup,
+    get_inline_wa_mailing_correct_markup, wa_save_correct_phones_markup, get_content_markup
 )
 from repositories.getRepo import (get_channel_repo, get_client_repo, get_member_repo,
                                   get_proxy_repo, get_user_repo, get_report_repo, get_channel_client_repo,
@@ -125,8 +130,52 @@ async def send_report_and_plan(dp:Dispatcher):
         LOGGER.error(f'Проблема с отчетом: {err}')
 
 
+async def check_WA_accs():
+    count_logout, count_auth, count_ban = 0, 0, 0
+    try:
+        user_repo = get_user_repo()
+        admins = await user_repo.get_all_admins()
+        wa_repo = get_wa_client_repo()
+        all_accs = await wa_repo.get_all()
+        LOGGER.info('Начинается ежедневная проверка авторизации всех аккаутов WA')
+        for acc in all_accs:
+            wa_acc_state = await wa_check_state(acc)
+            LOGGER.info(f'Состояние интсанса {acc.id}: {wa_acc_state}')
+            if wa_acc_state == 'authorized':
+                phone = await wa_get_acc_settings(acc)
+                await wa_repo.update(acc.id, phone = phone['wid'], status_id=WA_CStatuses.AUTHORIZED.value['id'])
+                count_auth+=1
+            elif wa_acc_state == 'notAuthorized' and acc.status_id == WA_CStatuses.AUTHORIZED.value['id']:
+                await wa_repo.update(
+                        acc.id, phone = 'not authorized',
+                        status_id=WA_CStatuses.WAITING_AUTHORIZATION.value['id']
+                    )
+                for admin in admins:
+                    await bot.send_message(chat_id=admin.id, text=f'Инстанс #{acc.id} не авторизован, авторизуйте инстанс')
+                count_logout+=1
+            elif wa_acc_state == 'blocked' and acc.status_id == WA_CStatuses.AUTHORIZED.value['id']:
+                await wa_repo.update(acc.id, phone = 'not authorized', status_id=WA_CStatuses.BANNED.value['id'])
+                for admin in admins:
+                    await bot.send_message(chat_id=admin.id, text=f'Аккаунт #{acc.id} заблокирован, требуется авторизовать новый аккаунт')
+                count_ban += 1
+            else:
+                LOGGER.debug(f'Непонятный статус акка: {acc.id}')
+        ser_mes = (
+            'Отчет акков WA:\n\n'
+            f'Всего акков: {len(all_accs)}\n'
+            f'Кол-во авторизованных акков: {count_auth}\n'
+            f'Кол-во забаненых акков: {count_ban}\n'
+            f'Кол-во разлогинившихся акков акков: {count_logout}\n'
+        )
+        for admin in admins:
+            await bot.send_message(chat_id=admin.id, text=ser_mes)
+    except Exception as er:
+        LOGGER.error(f'Ошибка ежедневной проверки акков WA: {er}')
+
+
 scheduler.add_job(send_report_and_plan, 'cron', day_of_week='mon-sun', hour=14, minute=44, args=(dp,))
 # scheduler.add_job(wa_verify, 'cron', day_of_week='mon-sun', hour=16, minute=16)
+scheduler.add_job(check_WA_accs, 'cron', day_of_week='mon-sun', hour=7, minute=30)
 
 async def on_startup(dp):
     """Соединяемся с БД при запуске бота."""
@@ -136,7 +185,7 @@ async def on_startup(dp):
         LOGGER.info('DB is running')
         LOGGER.info('service folders created')
     except Exception as err:
-        LOGGER.critical('Не подключается БД!')
+        LOGGER.critical(f'Не подключается БД! {err}')
 
 
 # @dp.message_handler(content_types=['new_chat_members','left_chat_member'])
@@ -146,8 +195,15 @@ async def deleteServiceMes(mes: types.message):
     except Exception as err:
         LOGGER.error(err)
 
+@dp.message_handler(commands='test',state='*')
+async def testing(mes: types.Message):
+    c_repo = get_client_repo()
+    reserve_accs = await c_repo.get_reserve()
+    ok_reserve = await client_api.check_ban_accs(reserve_accs)
+    clients = [await client_api.get_client(acc) for acc in ok_reserve]
+    print(clients)
 
-# @dp.message_handler(commands='start', state=None)
+# @dp.message_handler(commands='start', state=Non   e)
 async def start(message: types.Message, state: FSMContext):
     try:
         args = message.get_args()
@@ -157,17 +213,19 @@ async def start(message: types.Message, state: FSMContext):
         u_repo = get_user_repo()
         user = await u_repo.get_by_id(message.chat.id)
         if user is None:
-            await message.answer("Ваша конфиденциальность важна для Полная информация "
-                                "о собираемых данных и о порядке их обработки содержится в "
-                                "нашей <a>Политика конфиденциальности</a>", parse_mode='html', reply_markup=user_accept_markup())
+            await message.answer("Используя бот, вы соглашаетесь с нашей политикой конфиденциальности и правилами сервиса. "
+                                 "Полная информация о данных, которые мы собираем, и о порядке их обработки содержится в нашей <a href='https://purrfect-pirate-2a8.notion.site/2cb362b1051e46f2829b06d8e450425c'><b>политике конфиденциальности</b></a>",
+                                 parse_mode='html',
+                                disable_web_page_preview=True, reply_markup=user_accept_markup())
             r_repo = get_report_repo()
             await r_repo.add_new_users(1)
+            await ClientState.accept.set()
         elif user.role_id == URoles.ADMIN.value['id']:
             await GlobalState.admin.set()
             await message.answer('Вы в главном меню', reply_markup=MAIN_MARKUP)
         elif user.role_id == URoles.USER.value['id']:
             await ClientState.client.set()
-            await message.answer('Вы в главном меню', reply_markup=MAIN_CL_MARKUP)  
+            await message.answer('Вы в главном меню', reply_markup=MAIN_CL_MARKUP)
         else:
             await message.answer("Ожидание регистрации")
     except Exception as err:
@@ -190,8 +248,10 @@ async def reg_menu_send_phone_code(message: types.message, state: FSMContext):
         async with state.proxy() as data:
             data['cl_phone'] = message.contact.phone_number
         await state.set_state(ClientState.about_1)
-        await message.answer('Расскажите немного о себе\n'
-                             'Мы настроим ваш INVITE_Bot на основе вашего выбора')
+
+        ph = await bot.send_photo(message.from_user.id, open('img/About_yourself.jpg', 'rb'))
+        async with state.proxy() as data:
+            data['photo_id'] = ph.message_id
         await message.answer('Какая ваша сфера занятости?', reply_markup=sphere_markup())
     except Exception as err:
         LOGGER.error(err)
@@ -214,7 +274,7 @@ async def reg_menu_bot_usage(call: types.CallbackQuery, state: FSMContext):
         async with state.proxy() as data:
             data['cl_job_title'] = (call.data).split(':')[1]
         await state.set_state(ClientState.about_3)
-        await call.message.answer('Для каких целей планируете использовать Invite_Bot?', reply_markup=bot_usage_markup())
+        await call.message.answer('Для чего хотите использовать Invite Bot?', reply_markup=bot_usage_markup())
     except Exception as err:
         LOGGER.error(err)
 
@@ -238,7 +298,11 @@ async def reg_menu_save_answers(call: types.CallbackQuery, state: FSMContext):
                 where_from=data['where_from']
             )
         await state.set_state(ClientState.client)
-        await call.message.answer('Регистрация пройдена успешно!')
+        # await call.message.answer('Регистрация пройдена успешно!')
+        async with state.proxy() as data:
+            await bot.delete_message(chat_id=call.from_user.id, message_id=data['photo_id'])
+        await bot.send_photo(call.from_user.id, open('img/End_reg.jpg', 'rb'))
+        #TODO Тут судя по тексту в документе должен быть обущающий ролик
         await call.message.answer('Вы в главном меню', reply_markup=MAIN_CL_MARKUP)
     except Exception as err:
         LOGGER.critical(f'Ошибка создания профайла юзера {err}')
@@ -251,10 +315,13 @@ async def user_profile(message: types.Message, state: FSMContext):
         ch_c_repo = get_channel_client_repo()
         count_channel = await ch_c_repo.get_count_client_channel(message.from_user.id)
         user = await user_repo.get_by_id(message.from_user.id)
-        await message.answer(
-            f'ID Profile: {user.id}\nБаланс: {user.balance}\nПодключённых групп: {count_channel}',
-            reply_markup=get_profile_markup()
-        )
+        await bot.send_photo(message.from_user.id, open('img/Profile.jpg', 'rb'),
+                             caption=f'ID Profile: {user.id}\nБаланс: {user.balance}\nПодключённых групп: {count_channel}',
+                             reply_markup=get_profile_markup())
+        # await message.answer(
+        #     f'ID Profile: {user.id}\nБаланс: {user.balance}\nПодключённых групп: {count_channel}',
+        #     reply_markup=get_profile_markup()
+        # )
     except Exception as err:
         LOGGER.error(err)
 
@@ -274,8 +341,8 @@ async def que_and_ans(message: types.Message):
             '• Подключить услуги инвайта можно к неограниченному количеству чатов.\n'
             '• Вы сможете в реальном времени наблюдать статистику приглашенных пользователей.\n'
             '• История поиска открытых чатов доступна в любой момент\n'
-            '• Политика конфиденциальности и договор оферта здесь')
-        await message.answer(mes, reply_markup=support_markup())
+            "• Политика конфиденциальности и договор оферта <a href='https://purrfect-pirate-2a8.notion.site/2cb362b1051e46f2829b06d8e450425c'><b>здесь</b></a>")
+        await message.answer(mes, parse_mode='html', disable_web_page_preview=True, reply_markup=support_markup())
     except Exception as err:
         LOGGER.error(err)
 
@@ -297,15 +364,78 @@ async def amount_ask(call: types.CallbackQuery, state: FSMContext):
 
 
 async def payment_confirmation(message: types.Message, state: FSMContext):
+    # try:
+    #     async with state.proxy() as data:
+    #         data['amount'] = message.text
+    #     await message.answer('Продолжая вы соглашаетесь с политикой и договором офертой\n\n'
+    #                          'Ссылка на договор\n'
+    #                          "<a href='https://purrfect-pirate-2a8.notion.site/2cb362b1051e46f2829b06d8e450425c'><b>Ссылка на политику</b></a>",
+    #                          parse_mode='html', disable_web_page_preview=True, reply_markup=pay_markup(message.from_user.id, message.text))
+    # except Exception as er:
+    await state.set_state(ClientState.client)
+    # LOGGER.error(er)
+    await message.answer('Пополнение баланса сейчас недоступно, попробуйте позже', reply_markup=MAIN_CL_MARKUP)
+
+
+async def check_payment_ans(call: types.CallbackQuery, state: FSMContext):
+    await call.message.answer(
+        'Пришлите номер заказа'
+    )
+    current_state = await state.get_state()
+    print(current_state)
+    async with state.proxy() as data:
+        data['cur_state'] = current_state
+        data['amount'] = call.data.split(':')[-1]
+    await ClientState.check_paym.set()
+
+
+async def check_payment(message: types.Message, state: FSMContext):
+    async with state.proxy() as data:
+        cur_state = data['cur_state']
+        amount = data['amount']
+    order_id = message.text
+    user_repo = get_user_repo()
+    endpoint = f'https://invite-robot.ru/api/get_payment/{order_id}/'
+    info = requests.get(endpoint)
+    user = await user_repo.get_by_id(str(message.from_user.id))
+    user_bl = user.balance
     try:
-        async with state.proxy() as data:
-            data['amount'] = message.text
-        await message.answer('Продолжая вы соглашаетесь с политикой и договором офертой\n\n'
-                             'Ссылка на договор\n'
-                             'Ссылка на политику', reply_markup=pay_markup())
-    except:
-        await state.set_state(ClientState.client)
-        await message.answer('Пополнение баланса сейчас недоступно, попробуйте позже', reply_markup=MAIN_CL_MARKUP)
+        print(info.json()[0]['Amount'], amount)
+        if info.json()[0]['Amount'] and info.json()[0]['Confirmed'] == False:
+            bl=info.json()[0]['Amount']//100
+            if cur_state == 'GlobalState:lang_choice':
+                if info.json()[0]['Amount'] == 100:
+                    await message.answer('Оплата прошла успешно! Поздравляем!', reply_markup=get_content_markup(
+                        msg='Получить чаты', data='getchats'
+                    ))
+                    await GlobalState.lang_choice.set()
+                    requests.get(f'https://invite-robot.ru/api/confirm_payment/{order_id}/')
+                    await user_repo.new_payment(message.from_user.id, 100, 'search')
+                else:
+                    await message.answer('Неверная сумма!', reply_markup=MAIN_CL_MARKUP)
+                    await ClientState.client.set()
+            elif cur_state == 'ClientState:pay_mems':
+                if info.json()[0]['Amount'] == int(int(amount)*100):
+                    await message.answer('Оплата прошла успешно! Поздравляем!', reply_markup=get_content_markup(
+                        msg='Получить данные', data='getmems'
+                    ))
+                    await ClientState.pay_mems.set()
+                    requests.get(f'https://invite-robot.ru/api/confirm_payment/{order_id}/')
+                    await user_repo.new_payment(message.from_user.id, int(int(amount)*100), 'mem_scrap')
+                else:
+                    await message.answer('Неверная сумма!', reply_markup=MAIN_CL_MARKUP)
+                    await ClientState.client.set()
+            # await user_repo.update(id=message.from_user.id, balance=user_bl+bl)
+            # await message.answer(f'Баланс успешно пополнен на сумму {bl} рублей', reply_markup=MAIN_CL_MARKUP)
+            # await ClientState.client.set()
+        else:
+            await message.answer('Заказа с таким номером не существует', reply_markup=MAIN_CL_MARKUP)
+            await ClientState.client.set()
+    except Exception as er:
+        LOGGER.critical(er)
+        await message.answer('Заказа с таким номером не существует', reply_markup=MAIN_CL_MARKUP)
+        await ClientState.client.set()
+
 
 
 async def send_wa_accounts(message: types.Message):
@@ -462,7 +592,7 @@ async def proxyOFF(call: types.CallbackQuery, state: FSMContext):
             data['client_data'] = client_data
         if await get_proxy_repo().getStatusProxy(data['client_data'].id) == 1:
             await get_proxy_repo().setOFFProxy(data['client_data'].id)
-        await call.message.answer('Прокси были вылючены!')
+        await call.message.answer('Прокси были выключены!')
         await call.message.edit_reply_markup(reply_markup=None)
     except Exception as err:
         LOGGER.error(err)
@@ -510,7 +640,7 @@ async def cancel(message: types.Message, state: FSMContext):
             await message.reply('OK')
             await message.answer('Вы в главном меню', reply_markup=MAIN_CL_MARKUP)
     except Exception as err:
-        LOGGER.error(err)     
+        LOGGER.error(err)
 
 
 async def WA_echo_add_account(message: types.Message):
@@ -571,7 +701,7 @@ async def wa_auth(call: types.CallbackQuery, state: FSMContext):
             await wa_repo.update(client_data.id, phone = phone['wid'],status_id=WA_CStatuses.AUTHORIZED.value['id'])
             await call.message.answer('Аккаунт успешно авторизован', reply_markup=MAIN_MARKUP)
         elif wa_acc_state == 'blocked':
-            await wa_repo.update(client_data.id, status_id=WA_CStatuses.BANNED.value['id'])
+            await wa_repo.update(client_data.id, phone = 'not authorized', status_id=WA_CStatuses.BANNED.value['id'])
             await call.message.answer('Аккаунт заблокирован', reply_markup=MAIN_MARKUP)
         else:
             await call.message.answer(
@@ -621,6 +751,15 @@ async def WA_logout(call: types.CallbackQuery):
                     'Что-то пошло не так. Попробуйте еще раз',
                     reply_markup=cancel_markup()
                 )
+        elif wa_acc_state == 'notAuthorized':
+            await wa_repo.update(
+                    client_data.id, phone = 'not authorized',
+                    status_id=WA_CStatuses.WAITING_AUTHORIZATION.value['id']
+                )
+            await call.message.answer('Аккаунт успешно разлогинен', reply_markup=MAIN_MARKUP)
+        elif wa_acc_state == 'blocked':
+            await wa_repo.update(client_data.id, phone = 'not authorized', status_id=WA_CStatuses.BANNED.value['id'])
+            await call.message.answer('Аккаунт заблокирован, требуется авторизовать новый аккаунт', reply_markup=MAIN_MARKUP)
         else:
             await call.message.answer(f'Статус аккаунта: {wa_acc_state}', reply_markup=MAIN_MARKUP)
     except Exception as err:
@@ -642,10 +781,39 @@ async def WA_reboot(call: types.CallbackQuery):
                     'Что-то пошло не так. Попробуйте еще раз',
                     reply_markup=cancel_markup()
                 )
+        elif wa_acc_state == 'notAuthorized':
+            await wa_repo.update(
+                    client_data.id, phone = 'not authorized',
+                    status_id=WA_CStatuses.WAITING_AUTHORIZATION.value['id']
+                )
+            await call.message.answer('Аккаунт не авторизован!', reply_markup=MAIN_MARKUP)
+        elif wa_acc_state == 'blocked':
+            await wa_repo.update(client_data.id, phone = 'not authorized', status_id=WA_CStatuses.BANNED.value['id'])
+            await call.message.answer('Аккаунт заблокирован, требуется авторизовать новый аккаунт', reply_markup=MAIN_MARKUP)
         else:
             await call.message.answer(f'Статус аккаунта: {wa_acc_state}', reply_markup=MAIN_MARKUP)
     except Exception as err:
         LOGGER.error(err)
+
+
+async def WA_delete(call: types.CallbackQuery):
+    try:
+        wa_repo = get_wa_client_repo()
+        client_id = call.data.split(':')[-1]
+        client_data = await wa_repo.get_by_id(client_id)
+        wa_acc_state = await wa_check_state(client_data)
+        if wa_acc_state == 'authorized':
+            logout = await wa_logout(client_data)
+            if logout == True:
+                LOGGER.info('Инстанс был авторизовн и перед удалением был разлогинен')
+            else:
+                LOGGER.debug('Не получилось разлогинить инстанс перед удалением')
+        await wa_repo.delete(client_data.id)
+        await call.message.delete()
+        await call.message.answer('Инстанс успешно удален', reply_markup=MAIN_MARKUP)
+    except Exception as er:
+        LOGGER.error(er)
+        await call.message.answer(f'Что-то пошло не так: {er}', reply_markup=MAIN_MARKUP)
 
 
 async def WA_mailing(message: types.Message):
@@ -667,7 +835,7 @@ async def WA_mailing_message(message: types.Message, state: FSMContext):
         path = os.path.join(
                 os.path.abspath(os.path.dirname(__file__)), f'./wa_mailing_contacts/wa_{message.chat.id}.xlsx'
         )
-        # os.remove(path)
+        os.remove(path)
         await GlobalState.wa_mailing_message.set()
         await message.answer(f'Найдено {count_phones} номеров для рассылки')
         await message.answer('Напишите текст для отправки', reply_markup=cancel_markup())
@@ -683,7 +851,7 @@ async def WA_mailing_info(message: types.Message, state: FSMContext):
         await message.answer(
             f'Кол-во номеров телефонов для рассылки: {count_phones}\n\n'
             'текст сообщения:\n'
-            f'{message.text}', 
+            f'{message.text}',
             reply_markup=wa_save_mailing_markup()
         )
     except Exception as err:
@@ -701,6 +869,7 @@ async def WA_mailing_save(call: types.CallbackQuery, state: FSMContext):
              call.from_user.id, WA_Mailing_statuses.UNWORKING.value['id'], for_sending, text, phones
         )
         await GlobalState.admin.set()
+        await call.message.edit_reply_markup(reply_markup=None)
         await call.message.answer('Рассылка успешно сохранена', reply_markup=MAIN_MARKUP)
     except Exception as err:
         LOGGER.error(err)
@@ -712,11 +881,127 @@ async def WA_mailing_start(call: types.CallbackQuery, state: FSMContext):
     try:
         mai_id = call.data.split(':')[-1]
         wa_repo = get_wa_client_repo()
+        mai = await wa_repo.get_mailing_by_id(mai_id)
         await wa_repo.mailing_update(mai_id, status_id=WA_Mailing_statuses.WORKING.value['id'])
+        await call.message.answer('Рассылка запущена')
+        await call.message.edit_reply_markup(reply_markup=get_inline_wa_mailing_cont_markup(mai))
         await wa_mailing(mai_id)
     except Exception as err:
         LOGGER.error(err)
 
+
+async def WA_mailing_stop(call: types.CallbackQuery):
+    try:
+        mai_id = call.data.split(':')[-1]
+        wa_repo = get_wa_client_repo()
+        mai = await wa_repo.get_mailing_by_id(mai_id)
+        await wa_repo.mailing_update(mai_id, status_id=WA_Mailing_statuses.PAUSED.value['id'])
+        await call.message.edit_reply_markup(reply_markup=get_inline_wa_mailing_stop_markup(mai))
+        await call.message.answer('Рассылка остановлена')
+    except Exception as err:
+        LOGGER.error(err)
+
+
+async def WA_mailing_delete(call: types.CallbackQuery):
+    try:
+        mai_id = call.data.split(':')[-1]
+        wa_repo = get_wa_client_repo()
+        await wa_repo.mailing_phones_delete(mai_id)
+        await wa_repo.mailing_delete(mai_id)
+        await call.message.delete()
+        await call.message.answer('Рассылка удалена')
+    except Exception as err:
+        LOGGER.error(err)
+
+
+async def WA_mailing_correct(call: types.CallbackQuery):
+    try:
+        mai_id = call.data.split(':')[-1]
+        wa_repo = get_wa_client_repo()
+        mai = await wa_repo.get_mailing_by_id(mai_id)
+        await call.message.edit_reply_markup(reply_markup=get_inline_wa_mailing_correct_markup(mai))
+    except Exception as err:
+        LOGGER.error(err)
+
+
+async def WA_mailing_correct_text(call: types.CallbackQuery, state: FSMContext):
+    try:
+        mai_id = call.data.split(':')[-1]
+        await call.message.answer('Введите новый текст для рассылки')
+        async with state.proxy() as data:
+            data['mai_id'] = mai_id
+        await GlobalState.wa_mailing_cor_text.set()
+    except Exception as er:
+        LOGGER.error(er)
+
+
+async def WA_mailing_correct_text_save(message: types.Message, state: FSMContext):
+    try:
+        async with state.proxy() as data:
+            mai_id = data['mai_id']
+        wa_repo = get_wa_client_repo()
+        await wa_repo.mailing_update(
+             mai_id, text=message.text
+        )
+        await GlobalState.admin.set()
+        await message.answer('Рассылка успешно обновлена', reply_markup=MAIN_MARKUP)
+    except Exception as err:
+        LOGGER.error(err)
+        await GlobalState.admin.set()
+        await message.answer(f'Что-то пошло не так, попробуйте позже\n\n{err}', reply_markup=MAIN_MARKUP)
+
+
+async def WA_mailing_correct_phones(call: types.CallbackQuery, state: FSMContext):
+    try:
+        mai_id = call.data.split(':')[-1]
+        async with state.proxy() as data:
+            data['m_id'] = mai_id
+        wa_repo = get_wa_client_repo()
+        mai = await wa_repo.get_mailing_by_id(mai_id)
+        await call.message.answer(
+            'Пришилите файл в формате "xlsx", столбец с номерами телефонов должен называться "phone"',
+            reply_markup=cancel_markup()
+        )
+        await GlobalState.wa_mailing_correct_file.set()
+    except Exception as err:
+        LOGGER.error(err)
+
+
+async def WA_correct_phones_info(message: types.Message, state: FSMContext):
+    try:
+        file = await bot.get_file(message.document.file_id)
+        file_path = file.file_path
+        await bot.download_file(file_path, f"./wa_mailing_contacts/wa_{message.from_user.id}.xlsx")
+        phones, count_phones = await WA_xlsx_search('phone', message.from_user.id)
+        async with state.proxy() as data:
+            data['phones'], data['count_phones'] = phones, count_phones
+        path = os.path.join(
+                os.path.abspath(os.path.dirname(__file__)), f'./wa_mailing_contacts/wa_{message.chat.id}.xlsx'
+        )
+        os.remove(path)
+        async with state.proxy() as data:
+            await message.answer(f'Найдено {count_phones} номеров для рассылки', reply_markup=wa_save_correct_phones_markup(data['m_id']))
+    except Exception as err:
+        LOGGER.error(err)
+
+
+async def WA_mailing_correct_phones_save(call: types.CallbackQuery, state: FSMContext):
+    mai_id = int(call.data.split(':')[-1])
+    try:
+        async with state.proxy() as data:
+            for_sending = int(data['count_phones'])
+            phones = data['phones']
+        wa_repo = get_wa_client_repo()
+        await wa_repo.update_mailing_contacts(
+             mai_id, for_sending, phones
+        )
+        await GlobalState.admin.set()
+        await call.message.edit_reply_markup(reply_markup=None)
+        await call.message.answer('Рассылка успешно обновлена', reply_markup=MAIN_MARKUP)
+    except Exception as err:
+        LOGGER.error(err)
+        await GlobalState.admin.set()
+        await call.message.answer(f'Что-то пошло не так, попробуйте позже\n\n{err}', reply_markup=MAIN_MARKUP)
 
 
 async def set_api_id(message: types.Message, state: FSMContext):
@@ -847,20 +1132,6 @@ async def ser_menu(message: types.Message):
     await message.answer('Вы в услугах', reply_markup=get_services_markup())
 
 
-async def keywords_ask(message: types.Message, state: FSMContext):
-    await state.set_state(GlobalState.start_ch_scrap)
-    await message.answer('Напишите пять ключевых слова на русском или английском языках через '
-                         'пробел максимально точно соответствующие вашей тематике/товару/услуге.'
-                         'Например, если вы ищете потенциальных покупателей онлайн курсов по Excel, '
-                         'то напишите: курсы Excel таблицы MicrosoftOffice powerpoint', reply_markup=cancel_markup())
-
-
-async def start_chat_scraping(message: types.Message, state: FSMContext):
-    async with state.proxy() as data:
-        data['user_keyw'] = message.text
-    await state.set_state(GlobalState.lang_choice)
-    await message.answer('Выберите желаемый сегмент аудитории для поиска', reply_markup=lang_ch_markup())
-
 
 @dp.message_handler(text=['Отмена', 'Вернуться в главное меню'], state=ClientState)
 async def cancelClient(message: types.Message, state: FSMContext):
@@ -873,15 +1144,16 @@ async def cancelClient(message: types.Message, state: FSMContext):
                     state=[ClientState.client, ClientState.wait_end_add_channle,ClientState.send_client_chat,
                            ClientState.accept_client_acc])
 async def send_clients_chat(mes:types.message, state: FSMContext):
-    await mes.answer('Пожалуйста, добавьте наш бот (@tginv_admin_bot)  в вашу группу и выдайте ему все права администратора.',
+    bot_name = await bot.get_me()
+    await mes.answer(f'Пожалуйста, добавьте наш бот (@{bot_name.username}) в вашу группу и предоставьте все права администратора',
                      reply_markup=accept_bot_markup())
     await state.set_state(ClientState.accept_bot)
 
 
 @dp.message_handler(text='Подтвердить', state=ClientState.accept_bot)
 async def accept_bot(mes: types.message, state: FSMContext):
-    await mes.answer('Отлтчно!', reply_markup=types.ReplyKeyboardRemove())
-    await mes.answer('Пришлите ссылку вашего чата ', reply_markup=cancel_markup_profile()
+    #await mes.answer('Отлично!', reply_markup=types.ReplyKeyboardRemove())
+    await mes.answer('Отлично! А теперь пришлите ссылку на ваш чат ', reply_markup=cancel_markup_profile()
                      )
     await state.set_state(ClientState.send_client_chat)
 
@@ -893,13 +1165,18 @@ async def add_acc_in_chat(mes:types.message, state: FSMContext):
         return
     c_repo = get_client_repo()
     reserve_accs = await c_repo.get_reserve()
-    clients = [await client_api.get_client(acc) for acc in reserve_accs]
+    ok_reserve = await client_api.check_ban_accs(reserve_accs)
+    if not ok_reserve:
+        await mes.answer("Произошла ошибка добавления аккаунтов! Обратитесь, пожалуйста в поддержку", reply_markup=call_employee())
+        LOGGER.error('У ПОЛЬЗОВАТЕЛЯ ЗАБЛОКИРОВАНЫ ВСЕ СВОИ АККАУНТЫ А РЕЗЕРВНЫЕ АККАУНТЫ ЗАКНОЧИЛИСЬ')
+        return
+    clients = [await client_api.get_client(acc) for acc in ok_reserve]
     hash = list(filter(None, mes.text.split('/')))[-1].replace('+', '')
     user_id = mes.from_user.id
-    fine = await client_api.add_client_in_chat(mes, clients, hash, user_id, reserve_accs, bot=bot,)
+    fine = await client_api.add_client_in_chat(mes, clients, hash, user_id, reserve_accs, bot=bot, channel_url=mes.text)
     if fine:
-        await mes.answer('Отлично! Аккаунты успешно добавлены в чат!.\n'
-                         'Теперь выдайте каждому аккаунту права администратора.',
+        await mes.answer('Супер! Все аккаунты добавлены в чат.\n'
+                         'Теперь каждому аккаунту нужно дать права администратора.',
                          reply_markup=accept_bot_markup())
     await state.set_state(ClientState.accept_client_acc)
         #НУЖНО БУДЕТ ДОБАВИТЬ ПРОВЕРКУ ВЫДАНЫ ЛИ ПРАВА АДМИНИСТРАТОРА АККАУНТАМ
@@ -976,6 +1253,10 @@ async def ON_invite_profile(mes: types.Message, state: FSMContext):
     ch_c_repo = get_channel_client_repo()
     user_id = mes.from_user.id
     active_accs = await client_repo.get_by_user_id_and_chat_id(user_id, chat_id)
+    if not active_accs:
+        await mes.answer(f'Нет активных аккаунтов! Обратитесь, пожалуйста в поддержку!', reply_markup=call_employee())
+        LOGGER.error('ПРОВЕРИТЬ ПРОКСИ!')
+        return
     # active_accs = [acc for acc in active_accs if acc.work_id == CWorkes.UNWORKING.value['id']]
     client_api.stop_invite_prof = False
 
@@ -985,7 +1266,7 @@ async def ON_invite_profile(mes: types.Message, state: FSMContext):
     members = []
     for soirce_id in list_sources:
         print(soirce_id)
-        if soirce_id.isdigit():
+        if isinstance(soirce_id, int):
             members.extend(list(await member_repo.get_all_by_id_source(soirce_id)))
         else:
             members.extend(list(await member_repo.get_all_by_id_source(await ch_repo.get_id_by_username(soirce_id))))
@@ -995,7 +1276,7 @@ async def ON_invite_profile(mes: types.Message, state: FSMContext):
                                     reply_markup=chat_profile_card(group[4]))
     await state.set_state(ClientState.wait_setting_group)
     #await client_api.inviting(msg, active_accs, chat_id, client_id, members)
-    await client_api.pre_inviting(msg, active_accs, chat_id, members[:300])
+    await client_api.pre_inviting(msg, active_accs, chat_id, members[:300], mes.from_user.id)
 
 
 @dp.message_handler(text='Выкл. инвайт', state=ClientState.wait_setting_group)
@@ -1007,6 +1288,7 @@ async def OFF_invite_profile(mes: types.Message, state: FSMContext):
     client_api.stop_invite_prof = True
     await ch_c_repo.set_invite_OFF_status(chat_id)
     group = await ch_c_repo.get_group_by_id_and_userId(chat_id, client_id)
+    print(group[5])
     await mes.answer('Инвайт был успешно отключен!', reply_markup=chat_profile_card(group[4]))
 
 
@@ -1056,7 +1338,8 @@ async def delete_source(call:types.CallbackQuery, state:FSMContext):
                     state=[ClientState.wait_end_add_channle, ClientState.wait_end_link_pars,
                            ClientState.client, ClientState.choice_source_add, ])
 async def start_set_inviting(mes: types.message, state: FSMContext):
-    await mes.answer('Отправь ссылку на открытый чат с твоей целевой аудиторией', reply_markup=cancel_markup_profile())
+    await bot.send_photo(mes.from_user.id, open('img/Invite.jpg', 'rb'), caption='Отправьте ссылку на открытый чат с вашей целевой аудиторией', reply_markup=cancel_markup_profile())
+    #await mes.answer('Отправьте ссылку на открытый чат с вашей целевой аудиторией', reply_markup=cancel_markup_profile())
     await state.set_state(ClientState.wait_link_pars)
 
 
@@ -1069,14 +1352,14 @@ async def pars_channel(mes: types.message, state: FSMContext):
     mem_repo = get_member_repo()
     r_repo = get_report_repo()
     active_accs = await c_repo.get_by_user_id(mes.from_user.id)
-    await mes.answer('Проверка аккаутов')
+    await mes.answer('Проверяем аккаунты…')
     active_accs = await client_api.check_ban_accs(active_accs)
     print(active_accs)
     if not active_accs:
         print('Нет активных аккаунтов!')
         await mes.answer('К сожалению, у вас нет активных аккаунтов! \nОбратитесь пожалуйста в поддержку', reply_markup=call_employee())
         return
-    await mes.answer('Проверка чата')
+    await mes.answer('Проверяем чат…')
     client = await client_api.get_client(active_accs[0])
     hash = list(filter(None, mes.text.split('/')))[-1].replace('+', '')
     ent = await client.get_entity(hash)
@@ -1084,7 +1367,7 @@ async def pars_channel(mes: types.message, state: FSMContext):
     user_id = mes.from_user.id
     members = await client_api.get_members(client,ent.id, user_id)
     if members is None:
-        await mes.answer('Ошибка проверки чата! \nСкорее всего, в этом чате подписчики скрыты!',
+        await mes.answer('Ошибка проверки чата. \nСкорее всего в этом чате подписчики скрыты',
                          reply_markup=error_pars_chat())
         await state.set_state(ClientState.wait_end_link_pars)
         return
@@ -1113,7 +1396,7 @@ async def pars_channel(mes: types.message, state: FSMContext):
     await state.update_data(res=res)
     await state.update_data(user_id=mes.from_user.id)
     if not res:
-        await mes.answer('Группы для инвайта не настроены! \nПерейдите в профиль и добавьте свои группы.',
+        await mes.answer('Группы для инвайта не настроены. \nПожалуйста, перейдите в профиль и добавьте свои группы',
                          reply_markup = go_to_profile())
         await state.set_state(ClientState.client)
         return
@@ -1121,7 +1404,7 @@ async def pars_channel(mes: types.message, state: FSMContext):
         await choice_chats_for_invite(mes, mes.from_user.id, i)
     mem_count = await mem_repo.get_all_by_id_source(ent.id)
     await mes.answer(f'Проверка чата прошла успешно! Доступных пользователей для инвайта {len(mem_count)} человек.\n'
-                     f'Выбери группу в которую будет происходить инвайт', reply_markup = cancel_markup_profile())
+                     f'Теперь выберите группу, куда будет идти инвайт', reply_markup = cancel_markup_profile())
     ch_repo = get_channel_repo()
     await ch_repo.add_new_channel_by_pars(ent.id, ent.title, ent.access_hash, ent.username, new_mem_count)
     await state.set_state(ClientState.choice_group_pars)
@@ -1134,14 +1417,16 @@ async def dop_state(mes:types.message, state:FSMContext):
         await choice_chats_for_invite(mes, mes.from_user.id, i)
     s_repo = get_source_repo()
     await s_repo.clear_group_source(res['chat_id'], res['id_source'])
-    await mes.answer(f'Выбери группу в которую будет происходить инвайт', reply_markup=cancel_markup_profile())
+    await mes.answer(f'Теперь выберите группу, куда будет идти инвайт', reply_markup=cancel_markup_profile())
     await state.set_state(ClientState.choice_group_pars)
 
 
 #@dp.callback_query_handlers(text_contains='invProfile:', state=ClientState.choice_group_pars)
 async def send_group_info_pars (call: types.CallbackQuery, state: FSMContext):
-    client_id = call.data.split(':')[-2]
+    print(call.data)
+    client_id = call.data.split(':')[1]
     chat_id = call.data.split(':')[-1]
+    client_channel_hash = call.data.split(':')[-1]
     print(chat_id)
     ch_c_repo = get_channel_client_repo()
     group = await ch_c_repo.get_group_by_id_and_userId(chat_id, client_id)
@@ -1155,9 +1440,9 @@ async def send_group_info_pars (call: types.CallbackQuery, state: FSMContext):
         await call.message.answer(f'Эта группа уже добавлена для {group[3]}')
         return
 
-    message = f'Выбрана группа "{group[3]}"\n\n' \
-              f'Инвайт в группу будет осуществляться из расчёта 300 человек в день для избежания блокировки телеграмм вашей группы.\n' \
-              f'* Обязательно проверьте наличие количество оплаченных инвайтов в личном кабинете.'
+    message = f'Вы выбрали "{group[3]}"\n\n' \
+              f'Инвайт в группу будет сделан из расчета 300 человек в день, чтобы избежать блокировки вашей группы.\n' \
+              f'Обязательно проверьте количество оплаченных инвайтов в личном кабинете'
     await call.message.answer(message, reply_markup=get_inline_chats_pars(client_id, chat_id))
     await s_repo.add_source_channel(f'{chat_id}', id_source)
     await state.update_data(chat_id = f'{chat_id}')
@@ -1185,9 +1470,10 @@ async def start_inv_settings(call: types.CallbackQuery, state: FSMContext):
     members = []
     for soirce_id in list_sources:
         print(soirce_id)
-        if soirce_id.isdigit():
+        try:
+            int(soirce_id)
             members.extend(list(await member_repo.get_all_by_id_source(soirce_id)))
-        else:
+        except:
             members.extend(list(await member_repo.get_all_by_id_source(await ch_repo.get_id_by_username(soirce_id))))
 
     await ch_c_repo.set_invite_ON_status(chat_id)
@@ -1195,7 +1481,7 @@ async def start_inv_settings(call: types.CallbackQuery, state: FSMContext):
                            reply_markup=get_inline_invite_stop_markup(client_id, chat_id))
     await state.set_state(ClientState.dop_state)
     # await client_api.inviting(msg, active_accs, chat_id, client_id, members)
-    await client_api.pre_inviting(msg, active_accs, chat_id, members[:300])
+    await client_api.pre_inviting(msg, active_accs, chat_id, members[:300], user_id)
 
 
 #@dp.callback_query_handlers(text_contains='stop_inviting:', state=ClientState.dop_state)
@@ -1203,13 +1489,32 @@ async def stop_inv_settings(call: types.CallbackQuery, state: FSMContext):
     ch_c_repo = get_channel_client_repo()
     client_id = call.data.split(':')[-2]
     chat_id = call.data.split(':')[-1]
+    print(chat_id)
     client_api.stop_invite_prof = True
     await ch_c_repo.set_invite_OFF_status(chat_id)
     await call.message.edit_text('Инвайт был успешно отключен!', reply_markup=get_inline_chats_pars(client_id, chat_id))
     await state.set_state(ClientState.dop_state)
 
 
-# @dp.message_handler(Text(equals='Поиск открытых чатов'), state=GlobalState.admin)
+async def keywords_ask(message: types.Message, state: FSMContext):
+    await state.set_state(GlobalState.start_ch_scrap)
+    #TODO Тут нужна картинка
+    await bot.send_photo(message.from_user.id, open('img/Search.jpg', 'rb'), caption='Функция «Поиск» поможет вам найти открытые чаты с вашей целевой аудиторией')
+    #await message.answer('Функция «Поиск» поможет вам найти открытые чаты с вашей целевой аудиторией')
+    await message.answer('Чтобы поиск прошел успешно, просто напишите минимум пять ключевых слов на русском или английском языках через пробел. '
+                         'Подберите слова, которые наиболее точно описывают вашу тематику, товар или услугу.'
+                         '\n\n'
+                         'Например, если вы ищете покупателей онлайн-курсов по Excel, то так и напишите: курсы Excel-таблицы Microsoft Office PowerPoint',
+                         reply_markup=cancel_markup())
+
+
+async def start_chat_scraping(message: types.Message, state: FSMContext):
+    async with state.proxy() as data:
+        data['user_keyw'] = message.text
+    await state.set_state(GlobalState.lang_choice)
+    await message.answer('Выберите тот сегмент аудитории, который больше всего подходит для поиска:', reply_markup=lang_ch_markup())
+
+
 async def ser_search_open_chat(call: types.CallbackQuery, state: FSMContext):
     await call.message.delete()
     channe_repo = get_channel_repo()
@@ -1218,13 +1523,20 @@ async def ser_search_open_chat(call: types.CallbackQuery, state: FSMContext):
     client_repo = get_client_repo()
     try:
         client_datas = await client_repo.get_by_status_and_work_id(
-            status_id=CStatuses.RESERVE.value['id'], work_id=CWorkes.UNWORKING.value['id']
-        )
-    except:
-        client_datas = await client_repo.get_by_status_and_work_id(
             status_id=CStatuses.AUTHORIZED.value['id'], work_id=CWorkes.UNWORKING.value['id']
-        ) 
-        LOGGER.info('Взяты акки AUTHORIZED')
+        )
+        if len(client_datas) == 0:
+            client_datas = await client_repo.get_by_status_and_work_id(
+                status_id=CStatuses.RESERVE.value['id'], work_id=CWorkes.UNWORKING.value['id']
+            )
+            if len(client_datas) == 0:
+                client_datas = await client_repo.get_by_status_and_work_id(
+                    status_id=CStatuses.PAUSED.value['id'], work_id=CWorkes.UNWORKING.value['id']
+                )
+    except:
+        LOGGER.debug('Нет свободных аккаунтов для парса чатов')
+        await state.set_state(ClientState.client)
+        await call.message.answer('К сожалению, поиск сейчас невозможен. Пожалуйста, вернитесь в главное меню.', reply_markup=go_to_main_markup())
     try:
         client_data = random.choice(client_datas)
         async with state.proxy() as data:
@@ -1238,12 +1550,11 @@ async def ser_search_open_chat(call: types.CallbackQuery, state: FSMContext):
             data['groups'] = groups
             await client_repo.update(data['client_scrap_data'].id, work_id=CWorkes.UNWORKING.value['id'])
             await call.message.answer(
-                'Результаты поиска\n\n'
                 'Поиск чатов прошел успешно!\n'
-                f'Сформирован список из {len(groups)} самых популярных чатов в соответствие с ключевыми словами.\n\n'
-                'Стоимость поиска - 100 р',
+                f'Мы сформировали список из {len(groups)} самых популярных чатов, которые полностью соответствуют ключевым словам.\n\n'
+                'Стоимость поиска - 100 ₽',
 
-                reply_markup=inline_pay_markup()
+                reply_markup=pay_markup(call.from_user.id, 1)
             )
     except Exception as er:
         LOGGER.critical(er)
@@ -1253,10 +1564,11 @@ async def ser_search_open_chat(call: types.CallbackQuery, state: FSMContext):
         except Exception as er:
             LOGGER.critical(er)
         await state.set_state(ClientState.client)
-        await call.message.answer('К сожалению, поиск сейчас не возможен, вернитесь в главное меню', reply_markup=go_to_main_markup())
+        await call.message.answer('К сожалению, поиск сейчас невозможен. Пожалуйста, вернитесь в главное меню', reply_markup=go_to_main_markup())
 
 
 async def group_list(call: types.CallbackQuery, state: FSMContext):
+    await call.message.delete()
     try:
         ch_repo = get_channel_repo()
         async with state.proxy() as data:
@@ -1276,7 +1588,7 @@ async def group_list(call: types.CallbackQuery, state: FSMContext):
             mes = mes + f'{i}. @{result_dict[i][0]}  ({result_dict[i][1]} участников)\n\n'
         await call.message.answer(mes)
         await state.set_state(GlobalState.group_choice)
-        await call.message.answer('Выберите подходящие для вас чаты с вашей целевой аудиторий\n\n'
+        await call.message.answer('А теперь выберем подходящие чаты с вашей целевой аудиторий.\n\n'
                                   'Укажите их номера через пробел.\n'
                                   'Например: 1 2 3', reply_markup=inline_no_groups__markup())
     except Exception as err:
@@ -1285,7 +1597,7 @@ async def group_list(call: types.CallbackQuery, state: FSMContext):
 
 async def no_groups(call: types.CallbackQuery, state: FSMContext):
     await call.message.delete()
-    await call.message.answer('Расскажите, что вас не устроило в результатах поиска')
+    await call.message.answer('Расскажите, что вам не понравилось в результатах поиска')
     await state.set_state(ClientState.mark_nps)
 
 
@@ -1294,7 +1606,7 @@ async def parse_nps_ask(message: types.Message, state: FSMContext):
         data['nps_comment'] = message.text
     await state.set_state(ClientState.client)
     await message.answer(
-        'Оцените качество обслуживания по шкале от 1 до 5', 
+        'Оцените обслуживание по шкале от 1 до 5, где 1 — плохо, а 5 — отлично',
         reply_markup=nps_markup('parse')
     )
 
@@ -1342,7 +1654,7 @@ async def other_chats(call: types.CallbackQuery, state: FSMContext):
 
 async def parse_or_invite(call: types.CallbackQuery, state:FSMContext):
     await call.message.delete()
-    await call.message.answer('Выберите вариант действий', reply_markup=inline_scrap_or_invite_markup())
+    await call.message.answer('Выберите вариант действий:', reply_markup=inline_scrap_or_invite_markup())
     await state.set_state()
 
 # @dp.callback_query_handlers(text=['invite'],state=[ClientState.client])
@@ -1441,22 +1753,25 @@ async def numbers_scrap(call: types.CallbackQuery, state: FSMContext):
                 call.message, data['client_scrap_data'], data['lang'], groups, call.from_user.id
             )
             await client_repo.update(data['client_scrap_data'].id, work_id=CWorkes.UNWORKING.value['id'])
+            price = int(int(mem)*2.5)
         await call.message.answer(
-            f'Готово!\nКол-во полученных пользователей: {mem}', reply_markup=parse_start_markup()
+            f'Готово!\nКол-во полученных пользователей: {mem}\n\nСтоимость: {price} руб.', reply_markup=pay_markup(call.from_user.id, price)
         )
-        await state.set_state(ClientState.client)
+        await state.set_state(ClientState.pay_mems)
     except Exception as err:
+        await call.message.answer('Ой! Что-то пошло не так. Пожалуйста, напишите администратору', reply_markup=call_employee())
         LOGGER.error(err)
 
 
-async def send_file(message: types.Message, state: FSMContext):
+async def send_file(call: types.CallbackQuery, state: FSMContext):
     try:
-        await message.answer('Подготовка файла...')
-        file = open(f'./members/members_contacts_{message.chat.id}.xlsx', 'rb')
-        await bot.send_document(message.chat.id, file, caption='Файл готов!', reply_markup=go_to_main_markup())
+        await call.message.answer('Подготовка файла...')
+        file = open(f'./members/members_contacts_{call.from_user.id}.xlsx', 'rb')
+        await ClientState.client.set()
+        await bot.send_document(call.from_user.id, file, caption='Файл готов!', reply_markup=go_to_main_markup())
         file.close()
         path = os.path.join(
-                os.path.abspath(os.path.dirname(__file__)), f'./members/members_contacts_{message.chat.id}.xlsx'
+                os.path.abspath(os.path.dirname(__file__)), f'./members/members_contacts_{call.from_user.id}.xlsx'
         )
         os.remove(path)
     except Exception as err:
@@ -1468,26 +1783,30 @@ async def search_history(message: types.Message, state: FSMContext):
         history = await client_api.send_search_history(message.from_user.id)
         if history != 0:
             file = open(f'./history/search_history_{message.chat.id}.xlsx', 'rb')
-            await bot.send_document(message.chat.id, file, caption='Файл готов!', reply_markup=go_to_main_markup())
+            await bot.send_photo(message.from_user.id, open('img/Search_history.jpg', 'rb'), caption='Файл готов!')
+            await bot.send_document(message.chat.id, file)
             file.close()
             path = os.path.join(
                 os.path.abspath(os.path.dirname(__file__)), f'./history/search_history_{message.chat.id}.xlsx'
             )
             os.remove(path)
         else:
-            await message.answer('Ваша история поиска пуста, перейдите в меню "Поиск открытых чатов"')
+            await bot.send_photo(message.from_user.id, open('img/Search_history.jpg', 'rb'), caption='Ваша история поиска пуста, перейдите в меню "Поиск открытых чатов"')
+            #await message.answer('Ваша история поиска пуста, перейдите в меню "Поиск открытых чатов"')
     except Exception as err:
         LOGGER.error(err)
-        await message.answer('Ваша история поиска пуста, перейдите в меню "Поиск открытых чатов"')
+        await bot.send_photo(message.from_user.id, open('img/Search_history.jpg', 'rb'),
+                             caption='Ваша история поиска пуста, перейдите в меню "Поиск открытых чатов"')
+        # await message.answer('Ваша история поиска пуста, перейдите в меню "Поиск открытых чатов"')
 
 
 async def antispam(message: types.Message, state: FSMContext):
     user_repo = get_user_repo()
     u_name = await bot.get_me()
     await message.answer(
-        f'Чтобы бот(@{u_name.username}) ловил весь спам, рекламу и мат - сделайте его админом вашей группы,'
-        ' после этого он автоматически заработает. Если хотите добавить дополнительные слова, на которые '
-        'будет реагировать бот - нажмите "Добавить триггеры"', reply_markup=add_triger_markup()
+        f'Чтобы наш бот(@{u_name.username}) ловил весь спам, рекламу и мат, просто сделайте его админом вашей группы.'
+        ' После этого он автоматически начнет работать. Если хотите добавить дополнительные слова, на которые '
+        'будет реагировать бот, нажмите "Добавить триггеры"', reply_markup=add_triger_markup()
     )
     triggers = await user_repo.get_triggers_by_id(message.from_user.id)
     if len(triggers):
@@ -1502,7 +1821,7 @@ async def antispam(message: types.Message, state: FSMContext):
 async def add_triggers(call: types.CallbackQuery, state: FSMContext):
     await state.set_state(GlobalState.add_triggers)
     await call.message.answer(
-        'Перешлите мне ссылку на вашу группу, если группа закрытая, то пригласительную ссылку',
+        'Пожалуйста, пришлите ссылку на вашу группу. Если группа закрытая, то пригласительную ссылку',
         reply_markup=cancel_markup()
     )
 
@@ -1512,20 +1831,27 @@ async def get_chat_id(message: types.Message, state: FSMContext):
         client_repo = get_client_repo()
         try:
             client_datas = await client_repo.get_by_status_and_work_id(
-                status_id=CStatuses.RESERVE.value['id'], work_id=CWorkes.UNWORKING.value['id']
-            )
-        except:
-            client_datas = await client_repo.get_by_status_and_work_id(
                 status_id=CStatuses.AUTHORIZED.value['id'], work_id=CWorkes.UNWORKING.value['id']
-            ) 
-            LOGGER.info('Взяты акки AUTHORIZED')
+            )
+            if len(client_datas) == 0:
+                client_datas = await client_repo.get_by_status_and_work_id(
+                    status_id=CStatuses.RESERVE.value['id'], work_id=CWorkes.UNWORKING.value['id']
+                )
+                if len(client_datas) == 0:
+                    client_datas = await client_repo.get_by_status_and_work_id(
+                        status_id=CStatuses.PAUSED.value['id'], work_id=CWorkes.UNWORKING.value['id']
+                    )
+        except:
+            LOGGER.debug('Нет свободных аккаунтов для парса чатов')
+            await state.set_state(ClientState.client)
+            await message.answer('К сожалению,  эта функция сейчас недоступна, вернитесь в главное меню', reply_markup=go_to_main_markup())
         client_data = random.choice(client_datas)
         hash = list(filter(None, message.text.split('/')))[-1].replace('+', '')
         group_id = await client_api.get_user_group_id(client_data, message.text, hash)
         async with state.proxy() as data:
             data['group_id'] = str(group_id)
         await state.set_state(GlobalState.save_triggers)
-        await message.answer('Введите слова через пробел')
+        await message.answer('А теперь введите слова через пробел')
     except Exception as err:
         LOGGER.error(err)
         await message.answer('Что-то не так с ссылкой, попробуйте еще раз')
@@ -1582,14 +1908,31 @@ async def test(message: types.Message, state: FSMContext):
     await client_api.send_phone_hash_code(client_data)
 
 
+async def to_main_if_reboot(message: types.Message, state: FSMContext):
+    user_repo = get_user_repo()
+    user = await user_repo.get_by_id(message.from_user.id)
+    cur_state = await state.get_state()
+    if user:
+        if cur_state is None:
+            await message.answer('Произошла перезагрузка системы')
+            if user.role_id == 10:
+                await message.answer('Вы в главном меню', reply_markup=MAIN_MARKUP)
+                await GlobalState.admin.set()
+            elif user.role_id == 2:
+                await message.answer('Вы в главном меню', reply_markup=MAIN_CL_MARKUP)
+                await ClientState.client.set()
+    else:
+        await message.answer('Для начала регистрации - нажмите /start')
+
+
 def register_handlers_admin(dp: Dispatcher):
     dp.register_message_handler(deleteServiceMes, content_types=['new_chat_members', 'left_chat_member'])
 
     dp.register_message_handler(start, commands='start', state=None)
-
+    dp.register_message_handler(to_main_if_reboot, state=None)
     dp.register_message_handler(send_wa_accounts, Text(equals=Bts.WA_ACCS.value), state=GlobalState.admin)
     dp.register_message_handler(send_accounts, Text(equals=Bts.ACCOUNTS.value), state=GlobalState.admin)
-    dp.register_message_handler(reg_menu_ask_phone, Text(equals=ClientBts.ACCEPT_POLICY.value))
+    dp.register_message_handler(reg_menu_ask_phone, Text(equals=ClientBts.ACCEPT_POLICY.value), state=ClientState.accept)
     dp.register_message_handler(que_and_ans, Text(equals=ClientBts.QUE_AND_ANS.value), state='*')
     dp.register_message_handler(reg_menu_send_phone_code, content_types=types.ContentType.CONTACT, state=ClientState.send_phone_code)
     dp.register_message_handler(replenish_balance, Text(equals=ClientBts.REPLENISH_BALANCE.value), state=ClientState.client)
@@ -1611,9 +1954,20 @@ def register_handlers_admin(dp: Dispatcher):
     dp.register_message_handler(WA_mailing_info, state=GlobalState.wa_mailing_message)
     dp.register_callback_query_handler(WA_mailing_save, text_contains='wa_client:save_mailing', state=GlobalState.wa_mailing_message)
     dp.register_callback_query_handler(WA_mailing_start, text_contains='wa_mailing:mailing_start:', state=GlobalState.admin)
+    dp.register_callback_query_handler(WA_mailing_stop, text_contains='wa_mailing:mailing_stop:', state=GlobalState.admin)
+    dp.register_callback_query_handler(WA_mailing_delete, text_contains='wa_mailing:mailing_delete:', state=GlobalState.admin)
+    dp.register_callback_query_handler(WA_mailing_correct, text_contains='wa_mailing:mailing_correct:', state=GlobalState.admin)
+    dp.register_callback_query_handler(WA_mailing_correct_phones, text_contains='wa_mailing:mailing_correct_ph:', state=GlobalState.admin)
+    dp.register_callback_query_handler(WA_mailing_correct_text, text_contains='wa_mailing:mailing_correct_text:', state=GlobalState.admin)
+    dp.register_message_handler(WA_mailing_correct_text_save, state=GlobalState.wa_mailing_cor_text)
+    dp.register_message_handler(WA_correct_phones_info, content_types=[types.ContentType.DOCUMENT, ], state=GlobalState.wa_mailing_correct_file)
+    dp.register_callback_query_handler(WA_mailing_correct_phones_save, text_contains='wa_client:save_correct_phones:', state=GlobalState.wa_mailing_correct_file)
     dp.register_callback_query_handler(WA_logout, text_contains='wa_client:walogout:', state=GlobalState.admin)
     dp.register_callback_query_handler(WA_reboot, text_contains='wa_client:wareboot:', state=GlobalState.admin)
+    dp.register_callback_query_handler(WA_delete, text_contains='wa_client:wadelete:', state=GlobalState.admin)
+    dp.register_callback_query_handler(check_payment_ans, text_contains='checkpay:', state='*')
     dp.register_message_handler(set_api_id, state=GlobalState.set_api_id)
+    dp.register_message_handler(check_payment, state=ClientState.check_paym)
     dp.register_message_handler(set_api_hash, state=GlobalState.set_api_hash)
     dp.register_message_handler(set_phone, state=GlobalState.set_phone)
     dp.register_message_handler(get_chat_id, state=GlobalState.add_triggers)
@@ -1632,7 +1986,7 @@ def register_handlers_admin(dp: Dispatcher):
     dp.register_callback_query_handler(wa_check_auth, text_contains='wa_client:qrcheck:', state=GlobalState.wa_send_qr)
     dp.register_callback_query_handler(proxyOFF, text_contains='client:proxyOFF', state=GlobalState.admin)
     dp.register_callback_query_handler(proxyDELETE, text_contains='client:ProxyDelete', state=GlobalState.admin)
-    dp.register_callback_query_handler(group_list, text_contains='pay', state='*')
+    dp.register_callback_query_handler(group_list, text_contains='getchats', state=GlobalState.lang_choice)
     dp.register_message_handler(send_chats, Text(equals=Bts.GROUPS.value), state=GlobalState.admin)
     dp.register_callback_query_handler(parsing, text_contains='parsing:', state=GlobalState.admin)
     dp.register_callback_query_handler(stop_inviting, text_contains='stop_inviting:', state=GlobalState.admin)
@@ -1658,7 +2012,7 @@ def register_handlers_admin(dp: Dispatcher):
     dp.register_callback_query_handler(stop_inv_settings,text_contains='stop_inviting:', state=ClientState.dop_state)
     dp.register_callback_query_handler(delete_source,text_contains='delSource:', state=ClientState.choice_source_del)
     dp.register_message_handler(group_choice, state=GlobalState.group_choice)
-    dp.register_message_handler(send_file, Text(equals=Bts.PARSE_START.value), state=ClientState.client)
+    dp.register_callback_query_handler(send_file,text_contains='getmems', state=ClientState.pay_mems)
     dp.register_message_handler(antispam, Text(equals=Bts.ANTI_SPAM.value), state='*')
     dp.register_message_handler(save_triggers, state=GlobalState.save_triggers)
 

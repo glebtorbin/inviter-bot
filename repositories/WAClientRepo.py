@@ -27,6 +27,8 @@ class WaClientRepo(BaseRepo):
             query = sa.select(WA_Client).limit(limit).offset(skip)
             return await self.database.fetch_all(query)
         except Exception as err:
+            await self.database.disconnect()
+            await self.database.connect()
             LOGGER.critical(err)
     
     async def get_5(self, limit: int = 5, skip: int = 0) -> List[Row]:
@@ -93,15 +95,33 @@ class WaClientRepo(BaseRepo):
             }
             await self.database.execute(sa.insert(MailingPhones).values(**mailing_ph))
     
+    async def update_mailing_contacts(self, id, for_send, phones):
+        query = sa.select(WA_Mailing).where(WA_Mailing.id == id)
+        mailing = await self.database.fetch_one(query)
+        m_for_sending = mailing.for_sending
+        query = sa.update(WA_Mailing).where(WA_Mailing.id == id).values(for_sending=m_for_sending+for_send)
+        await self.database.execute(query)
+        for ph in phones:
+            mailing_ph = {
+                'mailing_id': id,
+                'phone': ph, 
+                'is_send': False
+            }
+            await self.database.execute(sa.insert(MailingPhones).values(**mailing_ph))
+    
 
-    async def get_all_mailing(self, limit: int = 100, skip: int = 0) -> List[Row]:
-        query = sa.select(WA_Mailing).limit(limit).offset(skip)
+    async def get_all_mailing(self, limit: int = 100) -> List[Row]:
+        query = sa.select(WA_Mailing).limit(limit)
         return await self.database.fetch_all(query)
     
     async def get_mailing_by_id(self, id):
         query = sa.select(WA_Mailing).where(WA_Mailing.id == id)
         return await self.database.fetch_one(query)
 
+
+    async def mailing_delete(self, id):
+        query = sa.delete(WA_Mailing).where(WA_Mailing.id == id)
+        return await self.database.execute(query)
 
     async def mailing_update(self, id: str, **kwargs) -> int:
         """`return`  id: `int`"""
@@ -117,7 +137,7 @@ class WaClientRepo(BaseRepo):
         return await self.database.execute(query)
     
     async def get_mailing_phones(self, mailing_id):
-        query = sa.select(MailingPhones).where(MailingPhones.mailing_id==mailing_id)
+        query = sa.select(MailingPhones).where(MailingPhones.mailing_id==mailing_id, MailingPhones.is_send==False)
         return await self.database.fetch_all(query)
     
     async def mailing_phones_update(self, mailing_id, phone, **kwargs) -> int:

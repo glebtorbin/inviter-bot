@@ -23,7 +23,7 @@ from telethon.errors.rpcerrorlist import (PeerFloodError,
                                           UserDeactivatedBanError,
                                           PhoneNumberBannedError,
                                           SessionRevokedError,
-                                          ChatAdminRequiredError, AuthKeyUnregisteredError)
+                                          ChatAdminRequiredError, AuthKeyUnregisteredError,)
 from telethon.sync import TelegramClient
 from telethon.tl.functions.channels import InviteToChannelRequest, GetParticipantsRequest, JoinChannelRequest, \
     LeaveChannelRequest
@@ -33,7 +33,7 @@ from telethon.tl.functions.contacts import SearchRequest
 from telethon.tl.types import InputPeerChat, InputPeerEmpty, InputPeerChannel, ChannelParticipantsSearch
 from telethon.tl.types import PeerUser, PeerChat, PeerChannel
 
-from keyboards import get_inline_invite_stop_markup, error_add_channel
+from keyboards import get_inline_invite_stop_markup, error_add_channel, call_employee
 from repositories.getRepo import get_proxy_repo, get_client_repo, get_member_repo, get_channel_repo, get_report_repo, \
     get_channel_client_repo, get_source_repo
 
@@ -88,6 +88,7 @@ async def client_is_authorized(client_data) -> bool:
 async def check_ban_accs(accounts):
     active_acc = []
     for client_data in accounts:
+        print(client_data)
         try:
             client = await get_client(client_data)
             b = await client.is_user_authorized()
@@ -101,12 +102,26 @@ async def check_ban_accs(accounts):
             active_acc.append(client_data)
         except (UserDeactivatedBanError, AuthKeyUnregisteredError, SessionRevokedError) as e:
             c_repo = get_client_repo()
+            c_ch_repo = get_channel_client_repo()
             LOGGER.error(e, f"{client_data[7]}")
             await c_repo.banned(client_data[0])
-            user_id = client_data[9]
-            chat_id = client_data[10]
+            user_id = client_data[10]
+            chat_id = client_data[11]
             res = await c_repo.get_next_reserve()
-            await c_repo.update(res[0], status_id=1, user_id=user_id, channel_id=chat_id)
+            try:
+                await c_repo.update(res[0], status_id=1, user_id=user_id, channel_id=chat_id)
+                url_invite = await c_ch_repo.get_url_by_client_id_and_ch_id(client_id=user_id, chat_or_channel=chat_id)
+                try:
+                    cl = await get_client(res)
+                    hash = list(filter(None, url_invite.split('/')))[-1].replace('+', '')
+                    await cl(ImportChatInviteRequest(hash))
+                except Exception as e:
+                    print(e, 'ПРИ ДОБАВЛЕНИИ АККАУНТА К ЧАТУ')
+                    LOGGER.error(e, 'ПРИ ДОБАВЛЕНИИ АККАУНТА К ЧАТУ')
+
+            except Exception as e:
+                LOGGER.error(e)
+                LOGGER.info('НЕТ СВОБОДЫХ АККАУНТОВ!')
             await c_repo.update(client_data[0], status_id=3, user_id=None, channel_id=None)
             r_repo = get_report_repo()
             await r_repo.add_ban_acc(1)
@@ -500,10 +515,10 @@ async def mem_scraping(message: types.Message, client_data, lang, groups: list, 
         '993', '996', '380', '371', '998', '370', '372', 
         '995'
     ]
-    await message.answer('Идет подсчет участников, к которым можно получить доступ...')
+    await message.answer('Подбираем участников, к которым можно получить доступ...')
     count_mem = 0
     user_count = 0 
-    workbook = xlsxwriter.Workbook(F'members/members_contacts_{uname}.xlsx')
+    workbook = xlsxwriter.Workbook(f'members/members_contacts_{uname}.xlsx')
     worksheet = workbook.add_worksheet('first_sheet')
     worksheet.write(0, 0, 'user_id')
     worksheet.write(0, 1, 'username')
@@ -592,25 +607,45 @@ async def _send_invite(client: TelegramClient, target_chat, member):
         await client(AddChatUserRequest(int(target_chat), member_entity, 100))
 
 
-async def new_inviting(client, member, target_chat, active_accs):
+async def new_inviting(client, member, target_chat, active_accs, user_id):
+    c_repo = get_client_repo()
+    m_repo = get_member_repo()
     try:
-        c_repo = get_client_repo()
         #r_repo = get_report_repo()
         clientID = await c_repo.get_id_by_api_id(client.api_id)
         await c_repo.plus_count_invite(clientID, 1)
         if await c_repo.get_data_paused_invite(clientID) == None:
             await c_repo.set_data_paused_invite(clientID)
         await _send_invite(client, target_chat, member)
+        await m_repo.updateRestricted(member.id, 1)
         #await r_repo.add_count_tg(1)
+    except UserPrivacyRestrictedError as e:
+        LOGGER.info('Обновил приватность')
+        await m_repo.updateRestricted(member.id, 0)
+        #error_count += 1
+        LOGGER.error(e)
     except Exception as err:
         LOGGER.error(err)
+        list_acc = await c_repo.get_by_user_id_and_chat_id(user_id, target_chat)
+        if not list_acc:
+            LOGGER.error('НЕТ АКТИВНЫХ АККАУНТОВ У ПОЛЬЗОВАТЕЛЯ (все зблокированы/проблема с прокси)')
+            global stop_invite_prof
+            stop_invite_prof = True
+            return
 
 
-async def pre_inviting(mes: types.Message, active_accs, target_chat, members):
+async def pre_inviting(mes: types.Message, active_accs, target_chat, members, user_id):
+    global stop_invite_prof
+    stop_invite_prof = False
+    ch_c_repo = get_channel_client_repo()
     m_repo = get_member_repo()
     c_repo = get_client_repo()
     error_count = 0
     active_accs = await check_ban_accs(active_accs)
+    if not active_accs:
+        LOGGER.error('НЕТ АКТИВНЫХ АККАУНТОВ У ПОЛЬЗОВАТЕЛЯ (все зблокированы/проблема с прокси)')
+        await mes.answer('К сожалению все аккаунты заблокированы! Обратитесь в поддержку!', reply_markup=call_employee())
+        return
     first_client = await get_client(active_accs[0])
     users_chat = [user.id for user in await first_client.get_participants(int(target_chat), aggressive=True)]
     new_memb_list_id = []
@@ -626,11 +661,12 @@ async def pre_inviting(mes: types.Message, active_accs, target_chat, members):
                 await c_repo.check_end_pause(clientID)
                 if await c_repo.get_count_invite(clientID) >= 30:
                     LOGGER.info(f'Аккаунт {cl.phone} на паузе!')
-                    await c_repo.check_valid_all_acc()
+                    await c_repo.check_valid_acc_client(mes, user_id, target_chat)
                     continue
                 if await c_repo.get_status_id(clientID) == 3:
                     LOGGER.info(f'Аккаунт {cl.phone} заблокирован!')
-                    await c_repo.check_valid_all_acc()
+                    await c_repo.check_valid_acc_client(mes,user_id, target_chat)
+                    await ch_c_repo.set_invite_OFF_status(target_chat)
                     continue
                 member = next(members)
                 flag = True
@@ -648,7 +684,7 @@ async def pre_inviting(mes: types.Message, active_accs, target_chat, members):
                         continue
                     flag=False
                 try:
-                    task = asyncio.create_task(new_inviting(client, member, target_chat, active_accs))
+                    task = asyncio.create_task(new_inviting(client, member, target_chat, active_accs, user_id))
                     await task
                 except UserAlreadyParticipantError as e:
                     LOGGER.info('Уже есть в чате')
@@ -689,13 +725,28 @@ async def pre_inviting(mes: types.Message, active_accs, target_chat, members):
                     continue
                 ch_c_repo = get_channel_client_repo()
                 await ch_c_repo.add_one_success_inv(target_chat)
-                await m_repo.updateRestricted(member.id, 1)
             curr_count += 1
             await asyncio.sleep(3000 / len(active_accs))
         await mes.answer('Инвайтинг завершен!')
     except SessionRevokedError as e:
         LOGGER.error(e)
         await mes.answer(f'{e}\nИнвайтинг завершен с ошибкой!')
+    except Exception as e:
+        res = await c_repo.get_next_reserve()
+        try:
+            ch_c_repo = get_channel_client_repo()
+            await c_repo.update(res[0], status_id=1, user_id=user_id, channel_id=target_chat)
+            url_invite = await ch_c_repo.get_url_by_client_id_and_ch_id(client_id=user_id, chat_or_channel=target_chat)
+            try:
+                cl = await get_client(res)
+                hash = list(filter(None, url_invite.split('/')))[-1].replace('+', '')
+                await cl(ImportChatInviteRequest(hash))
+            except Exception as e:
+                print(e, 'ПРИ ДОБАВЛЕНИИ АККАУНТА К ЧАТУ')
+                LOGGER.error(e, 'ПРИ ДОБАВЛЕНИИ АККАУНТА К ЧАТУ')
+        except Exception as e:
+            print(e, 'ОШИБКА В ЧЕМ ТО ДРУГОМ')
+            LOGGER.error(e, 'ОШИБКА В ЧЕМ ТО ДРУГОМ')
 
 
 async def inviting(mes: types.Message, active_accs, target_chat, members):
@@ -824,7 +875,8 @@ async def disconnect_all() -> None:
 
 
 
-async def add_client_in_chat(mes, clients, hash, user_id, accs, bot):
+async def add_client_in_chat(mes, clients, hash, user_id, accs, bot, channel_url):
+    print(hash)
     ch_c_repo = get_channel_client_repo()
     c_repo = get_client_repo()
     phons = [i[7] for i in accs]
@@ -840,10 +892,10 @@ async def add_client_in_chat(mes, clients, hash, user_id, accs, bot):
                 ch = await client(CheckChatInviteRequest(hash))
             except Exception as e:
                 LOGGER.error(e)
-                await mes.answer(f'Упс... Что-то пошло не так.\n'
-                                 f'Чат не удалось добавить. Проверьте каждый пункт из списка ниже и повторите попытку.\n'
+                await mes.answer(f'Что-то пошло не так..\n'
+                                 f'Чат не удалось добавить. Проверьте каждый пункт из списка ниже, и повторите попытку.\n'
                                  f'1. Ссылка-приглашение активна\n'
-                                 f'2. У бота есть разрешения: удаление сообщений; блокировка пользователей; пригласительные ссылки.\n'
+                                 f'2. У бота есть разрешения удалять сообщения, блокировать пользователей и рассылать пригласительные ссылки\n'
                                  f'Ошибка:{str(e)[:str(e).find("(")]}', reply_markup=error_add_channel())
                 return False
 
@@ -852,14 +904,14 @@ async def add_client_in_chat(mes, clients, hash, user_id, accs, bot):
             if flag:
                 ent = await client.get_entity(hash)
                 ids = await c_repo.get_all_channel(user_id, ent.id)
-                LOGGER.info('1', ids)
-                LOGGER.info('1',ent.id)
+                #LOGGER.info('1', ids)
+                #LOGGER.info('1',ent.id)
                 if str(ent.id) in ids and len(ids) >= 3:
                     await mes.answer('Эта группа уже подключена!', reply_markup=error_add_channel())
                     return
                 await client(JoinChannelRequest(hash))
                 await c_repo.set_user_and_channel_id(phons[k], mes.from_user.id, ent.id)
-                LOGGER.info(phons[k])
+                #LOGGER.info(phons[k])
             else:
                 try:
                     await client(ImportChatInviteRequest(hash))
@@ -868,14 +920,14 @@ async def add_client_in_chat(mes, clients, hash, user_id, accs, bot):
                     await client(ImportChatInviteRequest(hash))
                 ch = await client(CheckChatInviteRequest(hash))
                 ids = await c_repo.get_all_channel(user_id, ch.chat.id)
-                LOGGER.info('2', ids)
-                LOGGER.info('2', ch.chat.id)
+                #LOGGER.info('2', ids)
+                #LOGGER.info('2', ch.chat.id)
                 if str(ch.chat.id) in ids and len(ids) >= 3:
                     await mes.answer('Эта группа уже подключена!', reply_markup=error_add_channel())
                     await client.delete_dialog(ch.chat.id)
                     return
                 await c_repo.set_user_and_channel_id(phons[k], mes.from_user.id, ch.chat.id)
-                LOGGER.info(phons[k])
+                #LOGGER.info(phons[k])
         except UserAlreadyParticipantError as e:
             LOGGER.error(e)
             c = await client.get_me()
@@ -883,26 +935,81 @@ async def add_client_in_chat(mes, clients, hash, user_id, accs, bot):
             await mes.answer(f'Аккаунт {p_client} уже есть в этом чате!')
             continue
         except Exception as e:
-            await mes.answer(f'Упс... Что-то пошло не так.\n'
-                             f'Чат не удалось добавить. Проверьте каждый пункт из списка ниже и повторите попытку.\n'
-                             f'1. Ссылка-приглашение активна\n'
-                             f'2. У бота есть разрешения: удаление сообщений; блокировка пользователей; пригласительные ссылки.\n'
-                             f'Ошибка:{str(e)[:str(e).find("(")]}', reply_markup=error_add_channel())
+            await mes.answer(f'Что-то пошло не так..\n'
+                                 f'Чат не удалось добавить. Проверьте каждый пункт из списка ниже, и повторите попытку.\n'
+                                 f'1. Ссылка-приглашение активна\n'
+                                 f'2. У бота есть разрешения удалять сообщения, блокировать пользователей и рассылать пригласительные ссылки\n'
+                             f'Ошибка:{e}', reply_markup=error_add_channel())
             LOGGER.error(e)
             return False
         k+=1
     try:
-        await ch_c_repo.addChannel(user_id, ent.id, ent.title)
+        await ch_c_repo.addChannel(user_id, ent.id, ent.title, channel_url)
     except Exception as e:
         LOGGER.debug("ТУТ 1", e)
+        print(e)
         pass
     try:
-        await ch_c_repo.addChannel(user_id, ch.chat.id, ch.chat.title)
+        await ch_c_repo.addChannel(user_id, ch.chat.id, ch.chat.title, channel_url)
     except Exception as e:
         LOGGER.debug("ТУТ 2", e)
+        print(e)
         pass
     return True
 
+# def add_one_client_in_chat(clients, hash, user_id, acc):
+#     ch_c_repo = get_channel_client_repo()
+#     c_repo = get_client_repo()
+#     phons = acc[7]
+#     ent = None
+#     ch = None
+#     k = 0
+#     for client in list(clients):
+#         try:
+#             ent = await client.get_entity(hash)
+#             flag = True
+#         except:
+#             try:
+#                 ch = await client(CheckChatInviteRequest(hash))
+#             except Exception as e:
+#                 LOGGER.error(e)
+#                 return False
+#
+#             flag = False
+#         try:
+#             if flag:
+#                 ent = await client.get_entity(hash)
+#                 ids = await c_repo.get_all_channel(user_id, ent.id)
+#                 #LOGGER.info('1', ids)
+#                 #LOGGER.info('1',ent.id)
+#                 if str(ent.id) in ids and len(ids) >= 3:
+#                     return
+#                 await client(JoinChannelRequest(hash))
+#                 #LOGGER.info(phons[k])
+#             else:
+#                 try:
+#                     await client(ImportChatInviteRequest(hash))
+#                 except:
+#                     await asyncio.sleep(5)
+#                     await client(ImportChatInviteRequest(hash))
+#                 ch = await client(CheckChatInviteRequest(hash))
+#                 ids = await c_repo.get_all_channel(user_id, ch.chat.id)
+#                 #LOGGER.info('2', ids)
+#                 #LOGGER.info('2', ch.chat.id)
+#                 if str(ch.chat.id) in ids and len(ids) >= 3:
+#                     await client.delete_dialog(ch.chat.id)
+#                     return
+#                 #LOGGER.info(phons[k])
+#         except UserAlreadyParticipantError as e:
+#             LOGGER.error(e)
+#             c = await client.get_me()
+#             p_client = c.phone
+#             continue
+#         except Exception as e:
+#             LOGGER.error(e)
+#             return False
+#         k+=1
+#     return True
 
 def cicle(l: List):
     while True:

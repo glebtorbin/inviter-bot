@@ -11,7 +11,8 @@ class ChannelClientTable(Base):
     ch_id_name = Column(String(100), nullable=False)
     name = Column(String(100))
     status_invite = Column(Integer, nullable=False)
-    success_inv = Column(Integer, nullable=False)
+    success_inv = Column(Integer, default=0)
+    channel_url = Column(String(255), nullable=False)
 
 class ChannelSource(Base):
     __tablename__ = 'channel_source'

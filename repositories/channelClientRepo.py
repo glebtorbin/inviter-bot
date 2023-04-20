@@ -9,11 +9,20 @@ from .baseRepo import BaseRepo
 class ChannelClientRepo(BaseRepo):
     async def addChannel(self,user_id:str,
                          channel_id,
-                         name):
+                         name, channel_url):
         query = sa.insert(ChannelClientTable).values(client_id=user_id, ch_id_name = channel_id,
-                                                     name=name,
+                                                     name=name, channel_url=channel_url,
                                                      status_invite = 0)
         return await self.database.execute(query)
+
+    async def get_url_by_client_id_and_ch_id(self, client_id, chat_or_channel):
+        query = sa.select(ChannelClientTable.channel_url).where(ChannelClientTable.client_id == str(client_id),
+                                                                ChannelClientTable.ch_id_name==str(chat_or_channel))
+        res = await self.database.fetch_one(query)
+        if res:
+            return res[0]
+        else:
+            return None
 
     async def get_first_channel_id_by_user_id(self, user_id):
         query = sa.select(ChannelClientTable).where(ChannelClientTable.client_id == user_id)
@@ -40,7 +49,12 @@ class ChannelClientRepo(BaseRepo):
         q = sa.select(ChannelClientTable).where(ChannelClientTable.ch_id_name == target_chat)
         inv = await self.database.fetch_one(q)
         print(inv)
-        query = sa.update(ChannelClientTable).where(ChannelClientTable.ch_id_name == target_chat).values(success_inv=int(inv[5]) + 1)
+        try:
+            query = sa.update(ChannelClientTable).where(ChannelClientTable.ch_id_name == target_chat).values(
+                success_inv=int(inv[5]) + 1)
+        except:
+            query = sa.update(ChannelClientTable).where(ChannelClientTable.ch_id_name == target_chat).values(
+                success_inv=0)
         return await self.database.execute(query)
 
     async def get_count_success_inv(self, target_chat):

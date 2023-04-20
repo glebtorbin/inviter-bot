@@ -5,6 +5,19 @@ from aiogram.types import (InlineKeyboardButton, InlineKeyboardMarkup,
 from aiogram.types.menu_button import MenuButtonWebApp
 from enums import CProxyStatuses, CStatuses, WA_CStatuses, WA_Mailing_statuses
 
+def get_content_markup(msg, data):
+    markup = InlineKeyboardMarkup().add(
+        InlineKeyboardButton(msg, callback_data=data)
+    )
+    return markup
+
+
+def wa_save_correct_phones_markup(mai_id):
+    markup = InlineKeyboardMarkup().add(
+        InlineKeyboardButton('Добавить в рассылку', callback_data=f'wa_client:save_correct_phones:{mai_id}')
+    )
+    return markup
+
 def wa_save_mailing_markup():
     markup = InlineKeyboardMarkup().add(
         InlineKeyboardButton('Сохранить', callback_data=f'wa_client:save_mailing')
@@ -101,6 +114,7 @@ def error_add_channel():
 def call_employee():
     keyboard = [
         [KeyboardButton('Обратиться к поддержке')],
+        [KeyboardButton('Вернуться в главное меню')]
     ]
     markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     return markup
@@ -182,12 +196,12 @@ def cancel_markup_profile():
     markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     return markup
 
-def pay_markup():
-    webApp = WebAppInfo('./payment.html')
+def pay_markup(user_id, amount):
+    webApp = WebAppInfo(url=f'https://invite-robot.ru/pay_inv/{user_id}/{amount}/')
     keyboard = [
-        [MenuButtonWebApp('Оплатить', web_app=webApp), KeyboardButton('отмена')]
+        [InlineKeyboardButton('Оплатить', web_app=webApp), InlineKeyboardButton('Проверить оплату', callback_data=f'checkpay:{user_id}:{amount}')]
     ]  
-    markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     return markup  
 
@@ -234,8 +248,7 @@ def work_markup():
     keyboard = [
         [InlineKeyboardButton(text='Лидер команды', callback_data='work:Лидер команды')],
         [InlineKeyboardButton(text='Руководитель отдела', callback_data='work:Руководитель отдела')],
-        [InlineKeyboardButton(text='Самозанятый', callback_data='work:Самозанятый')],
-        [InlineKeyboardButton(text='Предприниматель', callback_data='work:Предприниматель')]
+        [InlineKeyboardButton(text='Самозанятый', callback_data='work:Самозанятый')]
     ]
     markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
     return markup
@@ -243,13 +256,13 @@ def work_markup():
 
 def sphere_markup():
     keyboard = [
-        [InlineKeyboardButton(text='Маркетинг', callback_data='sphere:Маркетинг')], [InlineKeyboardButton(text='Менеджер проектов', callback_data='sphere:Менеджер проектов')],
+        [InlineKeyboardButton(text='Маркетинг', callback_data='sphere:Маркетинг')],
         [InlineKeyboardButton(text='Дизайн', callback_data='sphere:Дизайн')],
-        [InlineKeyboardButton(text='IT', callback_data='sphere:IT')], [InlineKeyboardButton(text='Рекрутинг', callback_data='sphere:Рекрутинг')],
-        [InlineKeyboardButton(text='Студент', callback_data='sphere:Студент')],
+        [InlineKeyboardButton(text='Рекрутинг', callback_data='sphere:Рекрутинг')],
+        [InlineKeyboardButton(text='Финансы', callback_data='sphere:Финансы')],
         [InlineKeyboardButton(text='Образование', callback_data='sphere:Образование')],
-        [InlineKeyboardButton(text='Финансы', callback_data='sphere:Финансы')], [InlineKeyboardButton(text='Продажи', callback_data='sphere:Продажи')],
-        [InlineKeyboardButton(text='Консалтинг', callback_data='sphere:Консалтинг')]
+        [InlineKeyboardButton(text='Консалтинг', callback_data='sphere:Консалтинг')],
+        [InlineKeyboardButton(text='Другое', callback_data='sphere:Другое')]
     ]  
     markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
     return markup
@@ -320,10 +333,34 @@ def get_inline_client_markup(client) -> InlineKeyboardMarkup:
     markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
     return markup
 
+
+def get_inline_wa_mailing_correct_markup(mai):
+    keyboard = []
+    keyboard.append([InlineKeyboardButton(text='добавить номера', callback_data=f'wa_mailing:mailing_correct_ph:{mai.id}'),
+    InlineKeyboardButton(text='изменить текст', callback_data=f'wa_mailing:mailing_correct_text:{mai.id}')])
+    markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+    return markup 
+
+def get_inline_wa_mailing_cont_markup(mai):
+    keyboard = []
+    keyboard.append([InlineKeyboardButton(text='остановить', callback_data=f'wa_mailing:mailing_stop:{mai.id}')])
+    markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+    return markup 
+
+def get_inline_wa_mailing_stop_markup(mai):
+    keyboard = []
+    keyboard.append([InlineKeyboardButton(text='Запустить', callback_data=f'wa_mailing:mailing_start:{mai.id}'),
+    InlineKeyboardButton(text='Скорректировать', callback_data=f'wa_mailing:mailing_correct:{mai.id}')])
+    keyboard.append([InlineKeyboardButton(text='Удалить', callback_data=f'wa_mailing:mailing_delete:{mai.id}')])
+    markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+    return markup 
+
+
 def get_inline_wa_mailing_markup(mai):
     keyboard = []
     if mai.status_id == WA_Mailing_statuses.UNWORKING.value['id'] or mai.status_id == WA_Mailing_statuses.PAUSED.value['id']:
-        keyboard.append([InlineKeyboardButton(text='Запустить', callback_data=f'wa_mailing:mailing_start:{mai.id}')])
+        keyboard.append([InlineKeyboardButton(text='Запустить', callback_data=f'wa_mailing:mailing_start:{mai.id}'),
+        InlineKeyboardButton(text='Скорректировать', callback_data=f'wa_mailing:mailing_correct:{mai.id}')])
         keyboard.append([InlineKeyboardButton(text='Удалить', callback_data=f'wa_mailing:mailing_delete:{mai.id}')])
     elif mai.status_id == WA_Mailing_statuses.WORKING.value['id']:
         keyboard.append([InlineKeyboardButton(text='остановить', callback_data=f'wa_mailing:mailing_stop:{mai.id}')])

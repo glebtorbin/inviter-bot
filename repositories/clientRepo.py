@@ -11,11 +11,13 @@ from .baseRepo import BaseRepo, LOGGER
 class ClientRepo(BaseRepo):
     """ `Row` filds: `id`, `work_id`, `status_id`, `api_id`, `api_hash`, `phone`, `created_at`"""
 
-    async def get_all(self, limit: int = 100, skip: int = 0) -> List[Row]:
+    async def get_all(self, limit: int = 100) -> List[Row]:
         try:
-            query = sa.select(Client).limit(limit).offset(skip)
+            query = sa.select(Client).limit(limit)
             return await self.database.fetch_all(query)
         except Exception as err:
+            await self.database.disconnect()
+            await self.database.connect()
             LOGGER.critical(err)
         
 
@@ -46,7 +48,7 @@ class ClientRepo(BaseRepo):
         return await self.database.fetch_all(query)
 
     async def get_by_user_id_and_chat_id(self, user_id, chat_id):
-        query = sa.select(Client).where(Client.proxy_status_id==1, Client.status_id==1, Client.user_id == str(user_id), Client.channel_id==chat_id)
+        query = sa.select(Client).where(Client.proxy_status_id==1, Client.status_id==1, Client.user_id == str(user_id), Client.channel_id==int(chat_id))
         return await self.database.fetch_all(query)
 
 
@@ -74,6 +76,9 @@ class ClientRepo(BaseRepo):
         return res[2]
 
     async def set_user_and_channel_id(self, phone, user_id, channel_id):
+        print(phone, type(phone))
+        print(user_id, type(user_id))
+        print(channel_id, type(channel_id))
         query = sa.update(Client).where(Client.phone==phone).values(user_id=str(user_id), channel_id=str(channel_id), status_id=1)
         return await self.database.execute(query)
 
@@ -92,6 +97,10 @@ class ClientRepo(BaseRepo):
         list_status = [status[2] for status in await self.get_all()]
         if not 1 in list_status:
             raise Exception('Все аккаунты неактивны!')
+
+    async def check_valid_acc_client(self, mes, user_id):
+            await mes.answer('Инвайтинг был завершен с ошибкой!')
+            raise Exception('Все аккаунты клиента неактивны, а других нет!')
 
     async def create(self, work_id: int,
                      status_id: int,

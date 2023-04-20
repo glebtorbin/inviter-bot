@@ -148,16 +148,33 @@ async def wa_mailing(mailing_id):
         acc_num = 0
         len_accs = len(accs) - 1
         for acc in accs:
-            await wa_repo.update(acc.id, work_id=WA_CWorkes.CHECKING.value['id'])
-            # acc_status = await wa_check_state(acc)
-            # if acc_status != 'authorized':
-            #     accs.remove(acc)
-            #     await wa_repo.update(acc.id, status_id=WA_CStatuses.WAITING_AUTHORIZATION.value['id'], phone='not authorized')
-            #     LOGGER.info(f'Аккаунт {acc.id, acc.phone} вылетел, требуется проверка авторизации')
-            #     print(1)
+            await wa_repo.update(acc.id, work_id=WA_CWorkes.MAILING.value['id'])
+            acc_status = await wa_check_state(acc)
+            if acc_status != 'authorized':
+                accs.remove(acc)
+                if acc_status == 'notAuthorized':
+                    await wa_repo.update(acc.id, status_id=WA_CStatuses.WAITING_AUTHORIZATION.value['id'], phone='not authorized')
+                    LOGGER.info(f'Аккаунт {acc.id, acc.phone} вылетел, требуется проверка авторизации')
+                elif acc_status == 'blocked':
+                    await wa_repo.update(acc.id, status_id=WA_CStatuses.BANNED.value['id'], phone='not authorized')
+                    LOGGER.info(f'Аккаунт {acc.id, acc.phone} забанен, требуется привязка нового аккаунта')
+                else:
+                    await wa_repo.update(acc.id, status_id=WA_CStatuses.WAITING_AUTHORIZATION.value['id'], phone='not authorized')
+                    LOGGER.info(f'Аккаунт {acc.id, acc.phone} либо в спящем режиме, либо в процессе запуска.')
+        len_accs = len(accs) - 1
+        LOGGER.info(f'Рассылка {mailing_id} запускается, аккаунтов участвующих в рассылке: {len(accs)}')
         for contact in all_contacts:
+            mailing = await wa_repo.get_mailing_by_id(mailing_id)
+            if mailing.status_id != WA_Mailing_statuses.WORKING.value['id']:
+                for acc in accs:
+                    await wa_repo.update(acc.id, work_id=WA_CWorkes.UNWORKING.value['id'])
+                LOGGER.info(f'Рассылка {mailing_id} остановлена')
+                break
+            if len(accs) == 0:
+                LOGGER.debug('Нет аккаунтов для рассылки')
+                break
             acc = accs[acc_num]
-            print(acc.phone, contact, mailing.text)
+            # print(mailing_id, acc.phone, contact, mailing.text)
             payload = json.dumps({
                 "chatId": f"{contact.phone}@c.us",
                 "message": mailing.text
@@ -169,17 +186,26 @@ async def wa_mailing(mailing_id):
                 id=acc.id_instance, type='sendMessage', token=acc.api_token
             ), headers=headers, data = payload)
             print(response.json())
-            await wa_repo.mailing_phones_update(mailing_id=mailing_id, phone=contact.phone, is_send=True)
-            await wa_repo.mailing_send_update(mailing_id, c_send=1)
+            try:
+                response.json()['idMessage']
+                try:
+                    await wa_repo.mailing_phones_update(mailing_id=mailing_id, phone=contact.phone, is_send=True)
+                    await wa_repo.mailing_send_update(mailing_id, c_send=1)
+                except Exception as er:
+                    LOGGER.error(f'Oшибка обновления базы: {er}')
+            except Exception as er:
+                LOGGER.error(f'Ошибка при отправке с аккаунта {contact.phone}: {response.json()}, {er}')
             if acc_num < len_accs:
                 acc_num+=1
             else:
                 acc_num=0
-            await asyncio.sleep(2)
+            await asyncio.sleep(5)
         for acc in accs:
             await wa_repo.update(acc.id, work_id=WA_CWorkes.UNWORKING.value['id'])
-        await wa_repo.mailing_update(mailing_id, status_id=WA_Mailing_statuses.FINISHED.value['id'])
-        await wa_repo.mailing_phones_delete(mailing_id)
+        f_mailing = await wa_repo.get_mailing_by_id(mailing_id)
+        if f_mailing.status_id == WA_Mailing_statuses.WORKING.value['id']:
+            await wa_repo.mailing_update(mailing_id, status_id=WA_Mailing_statuses.FINISHED.value['id'])
+            await wa_repo.mailing_phones_delete(mailing_id)
     except Exception as err:
         LOGGER.error(err)
 

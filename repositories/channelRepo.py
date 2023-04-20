@@ -120,7 +120,7 @@ class ChannelRepo(BaseRepo):
                 'access_hash': access_hash,
                 'username': username,
                 'participants_count': participants,
-                'keyword_id': '-',
+                'keyword_id': -1,
                 'created_at': datetime.datetime.now()
             }
             query = sa.insert(Channel).values(**ch)
@@ -129,7 +129,7 @@ class ChannelRepo(BaseRepo):
             return res
 
     async def get_name_by_id_or_username(self, id_channel):
-        if id_channel.isdigit():
+        if isinstance(id_channel, int):
             query = sa.select(Channel).where(Channel.id==id_channel)
             res = await self.database.fetch_one(query)
         else:
@@ -141,7 +141,7 @@ class ChannelRepo(BaseRepo):
             return None
 
     async def get_username_by_id(self, id_channel):
-        if id_channel.isdigit():
+        if isinstance(id_channel, int):
             query = sa.select(Channel).where(Channel.id == id_channel)
             res = await self.database.fetch_one(query)
         else:
@@ -152,7 +152,7 @@ class ChannelRepo(BaseRepo):
             return None
 
     async def get_participants_count_by_id(self, id_channel):
-        if id_channel.isdigit():
+        if isinstance(id_channel, int):
             query = sa.select(Channel).where(Channel.id == id_channel)
             res = await self.database.fetch_one(query)
         else:

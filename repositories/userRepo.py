@@ -6,7 +6,7 @@ from sqlalchemy.engine import Row
 
 from db.model_users import User, UserBadWords
 from db.model_nps import Nps
-
+from db.model_payments import Payments
 from .baseRepo import BaseRepo
 
 
@@ -24,6 +24,10 @@ class UserRepo(BaseRepo):
     async def get_by_username(self, username: str) -> Optional[Row]:
         query = sa.select(User).where(User.username == username)
         return await self.database.fetch_one(query)
+    
+    async def get_all_admins(self):
+        query = sa.select(User).where(User.role_id == 10)
+        return await self.database.fetch_all(query)
 
     async def create(self, id: str,
                      first_name: Optional[str],
@@ -104,3 +108,14 @@ class UserRepo(BaseRepo):
 #     role_id = Column(Integer, ForeignKey('user_role.id'), nullable=False)
 #     # status_id = Column(Integer, ForeignKey('user_status.id'))
 #     created_at = Column(DateTime, nullable=False, default=datetime.datetime.now)
+
+    async def new_payment(self, user_id, amount, ser):
+        p = {
+            'user': user_id,
+            'service': ser,
+            'amount': amount,
+            'created_at': datetime.now()
+        }
+        query = sa.insert(Payments).values(**p)
+        return await self.database.execute(query)
+

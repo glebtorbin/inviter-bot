@@ -11,6 +11,8 @@ class GlobalState(StatesGroup):
     wa_token = State()
     wa_send_qr = State()
     wa_mailing_file = State()
+    wa_mailing_correct_file = State()
+    wa_mailing_cor_text = State()
     wa_mailing_message = State()
 
     add_proxy = State()
@@ -34,6 +36,7 @@ class GlobalState(StatesGroup):
 
     # keywords = State()
 class ClientState(StatesGroup):
+    accept = State()
     client = State()
     send_phone_code = State()
     enter_code = State()
@@ -42,8 +45,9 @@ class ClientState(StatesGroup):
     about_3 = State()
     cur_choice = State()
     paym_confirm = State()
+    check_paym = State()
     mark_nps = State()
-
+    pay_mems = State()
     add_group_to_sources = State()
 
     accept_bot = State()

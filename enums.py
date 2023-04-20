@@ -73,6 +73,7 @@ class WA_CWorkes(enum.Enum):
     """ `Client` workes `value = {'id':id, 'name':name, 'answer':answer}` """
     UNWORKING = {'id': 1, 'name': 'unworking', 'answer': 'Свободен'}
     CHECKING = {'id': 2, 'name': 'checking', 'answer': 'Проверяет аккаунты'}
+    MAILING = {'id': 3, 'name': 'mailing', 'answer': 'Участвует в рассылке'}
 
     @classmethod
     def _missing_(cls, id):

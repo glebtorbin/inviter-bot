@@ -24,7 +24,8 @@ def upgrade() -> None:
     sa.Column('ch_id_name', sa.String(length=100), nullable=False),
     sa.Column('name', sa.String(length=100), nullable=True),
     sa.Column('status_invite', sa.Integer(), nullable=False),
-    sa.Column('success_inv', sa.Integer(), nullable=False),
+    sa.Column('success_inv', sa.Integer()),
+    sa.Column('channel_url', sa.String(length=255)),
     sa.PrimaryKeyConstraint('id'),
     comment='Таблица для хранения чатов и каналов клиента, куда инвайтить'
     )
@@ -290,7 +291,7 @@ def upgrade() -> None:
     op.execute("INSERT INTO client_workes VALUES (2,'inviting'),(4,'mailing'),(3,'parsing'),(1,'unworking')")
     op.execute("INSERT INTO user_role VALUES (10,'admin'),(5,'pending'),(2, 'user')")
     op.execute("INSERT INTO wa_client_statuses VALUES (1,'authorized'),(3,'banned'),(2,'waiting_for_authorization')")
-    op.execute("INSERT INTO wa_client_workes VALUES (2,'checking'),(1,'unworking')")
+    op.execute("INSERT INTO wa_client_workes VALUES (2,'checking'),(1,'unworking'),(3,'mailing')")
     op.execute("INSERT INTO reports VALUES (1, 0, 0, 0 ,0, 0, 0, 0, 0, 0, 0)")
     op.execute("INSERT INTO wa_mailing_statuses VALUES (1,'unworking'),(2,'working'),(3,'finished'),(4,'paused')")
 
